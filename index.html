@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>像素随机地图生成器</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1a1a2e;
+            overflow: hidden;
+            font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        canvas { display: block; }
+        #ui {
+            position: fixed;
+            top: 0; left: 0; right: 0;
+            padding: 10px 16px;
+            background: linear-gradient(180deg, rgba(0,0,0,0.75) 0%, rgba(0,0,0,0) 100%);
+            color: #e0e0e0;
+            font-size: 13px;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            pointer-events: none;
+            z-index: 10;
+        }
+        .ui-sep { width: 1px; height: 14px; background: rgba(255,255,255,0.2); }
+        #ui span { font-variant-numeric: tabular-nums; }
+        #controls {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 10px;
+            z-index: 10;
+        }
+        #controls button {
+            padding: 8px 16px;
+            border: 1px solid rgba(255,255,255,0.25);
+            background: rgba(20,20,40,0.75);
+            color: #ddd;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            font-family: inherit;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+        #controls button:hover {
+            background: rgba(255,255,255,0.12);
+            border-color: rgba(255,255,255,0.45);
+            color: #fff;
+        }
+        #legend {
+            position: fixed;
+            bottom: 24px;
+            right: 20px;
+            display: flex;
+            gap: 14px;
+            z-index: 10;
+            color: #ccc;
+            font-size: 12px;
+            background: rgba(20,20,40,0.7);
+            padding: 8px 14px;
+            border-radius: 6px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .legend-item { display: flex; align-items: center; gap: 5px; }
+        .legend-color { width: 12px; height: 12px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.3); }
+        #hint {
+            position: fixed;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(255,255,255,0.45);
+            font-size: 12px;
+            z-index: 10;
+            pointer-events: none;
+            transition: opacity 1s;
+        }
+        #minimap {
+            position: fixed;
+            top: 50px;
+            right: 12px;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 4px;
+            z-index: 10;
+            image-rendering: pixelated;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="game"></canvas>
+    <canvas id="minimap"></canvas>
+    <div id="ui">
+        <span id="info-size">地图: --</span>
+        <span class="ui-sep"></span>
+        <span id="info-coords">坐标: --</span>
+        <span class="ui-sep"></span>
+        <span id="info-terrain">地形: --</span>
+        <span class="ui-sep"></span>
+        <span id="info-fps">FPS: --</span>
+    </div>
+    <div id="controls">
+        <button id="btn-regen">重新生成</button>
+        <button id="btn-zoom-out">- 缩小</button>
+        <button id="btn-zoom-in">+ 放大</button>
+    </div>
+    <div id="legend">
+        <div class="legend-item"><div class="legend-color" style="background:#C8E6C9"></div>平原</div>
+        <div class="legend-item"><div class="legend-color" style="background:#5C9CE6"></div>水域</div>
+        <div class="legend-item"><div class="legend-color" style="background:#81C784"></div>草丛</div>
+        <div class="legend-item"><div class="legend-color" style="background:#388E3C"></div>森林</div>
+    </div>
+    <div id="hint">WASD / 方向键移动 | 滚轮缩放 | R 键重新生成</div>
+    <script>
+    // ============================================================
+    // CONSTANTS
+    // ============================================================
+    var TERRAIN = { PLAINS: 0, WATER: 1, GRASS: 2, FOREST: 3 };
+    var TERRAIN_COLORS = ['#C8E6C9', '#5C9CE6', '#81C784', '#388E3C'];
+    var TERRAIN_NAMES  = ['平原', '水域', '草丛', '森林'];
+    var TERRAIN_SPEED  = [1, 0, 1, 0.5];
+
+    // Seed-based variation colors for each terrain (slightly lighter/darker variants)
+    var TERRAIN_VARIANTS = [
+        ['#C8E6C9','#B9DCBA','#D4ECD5','#BEE4BF','#CDE8CE'], // plains variants
+        ['#5C9CE6','#4D8ED8','#6BAAF0','#5292DC','#64A2EA'], // water variants
+        ['#81C784','#72B875','#90D493','#78BF7B','#88CC8B'], // grass variants
+        ['#388E3C','#2E7D32','#429A46','#348538','#3C9240'], // forest variants
+    ];
+
+    // ============================================================
+    // CANVAS SETUP
+    // ============================================================
+    var gameCanvas = document.getElementById('game');
+    var gameCtx = gameCanvas.getContext('2d');
+
+    var minimapCanvas = document.getElementById('minimap');
+    var minimapCtx = minimapCanvas.getContext('2d');
+    var MINIMAP_SIZE = 160;
+
+    function resizeCanvases() {
+        gameCanvas.width  = window.innerWidth;
+        gameCanvas.height = window.innerHeight;
+        minimapCanvas.width  = MINIMAP_SIZE;
+        minimapCanvas.height = MINIMAP_SIZE;
+    }
+    window.addEventListener('resize', resizeCanvases);
+    resizeCanvases();
+
+    // ============================================================
+    // GAME STATE
+    // ============================================================
+    var map       = null;
+    var mapSize   = 0;
+    var playerX   = 0;
+    var playerY   = 0;
+    var tileSize  = 10;
+    var moveAccum = 0;
+    var BASE_SPEED = 7; // tiles/sec on plains (held key)
+
+    // ============================================================
+    // HASH FUNCTIONS (for deterministic tile color variation)
+    // ============================================================
+    function hash2d(x, y) {
+        var h = (x * 374761393 + y * 668265263) & 0x7FFFFFFF;
+        h = ((h >> 16) ^ h) * 0x45d9f3b;
+        h = ((h >> 16) ^ h) & 0xFF;
+        return h;
+    }
+
+    // ============================================================
+    // MAP GENERATION
+    // ============================================================
+    function generateMap() {
+        mapSize = 200 + Math.floor(Math.random() * 801); // 200..1000
+
+        // Init with plains
+        map = new Array(mapSize);
+        for (var y = 0; y < mapSize; y++) {
+            map[y] = new Uint8Array(mapSize);
+        }
+
+        var area = mapSize * mapSize;
+
+        // Phase 1 -- Water (few large bodies)
+        var numWater = Math.max(1, Math.floor(area / 60000));
+        var maxWaterW = Math.max(6, Math.floor(mapSize / 6));
+        var maxWaterH = Math.max(6, Math.floor(mapSize / 8));
+        placePatches(TERRAIN.WATER, numWater, maxWaterW, maxWaterH, 3, 10, 0.5);
+
+        // Phase 2 -- Forest (medium patches)
+        var numForest = Math.floor(area / 2500);
+        var maxForestW = Math.max(3, Math.floor(mapSize / 25));
+        var maxForestH = Math.max(3, Math.floor(mapSize / 25));
+        placePatches(TERRAIN.FOREST, numForest, maxForestW, maxForestH, 2, 6, 0.35);
+
+        // Phase 3 -- Grass (many small patches, don't overwrite water)
+        var numGrass = Math.floor(area / 1800);
+        var maxGrassW = Math.max(2, Math.floor(mapSize / 40));
+        var maxGrassH = Math.max(2, Math.floor(mapSize / 40));
+        placePatches(TERRAIN.GRASS, numGrass, maxGrassW, maxGrassH, 2, 4, 0.25, true);
+
+        // Ensure player starts on non-water, prefer plains
+        playerX = Math.floor(mapSize / 2);
+        playerY = Math.floor(mapSize / 2);
+        if (map[playerY][playerX] === TERRAIN.WATER) {
+            var found = false;
+            for (var r = 1; r < mapSize && !found; r++) {
+                // Spiral outward
+                for (var dy = -r; dy <= r && !found; dy++) {
+                    for (var dx = -r; dx <= r && !found; dx++) {
+                        if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+                        var nx = (playerX + dx + mapSize) % mapSize;
+                        var ny = (playerY + dy + mapSize) % mapSize;
+                        if (map[ny][nx] !== TERRAIN.WATER) {
+                            playerX = nx;
+                            playerY = ny;
+                            found = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        moveAccum = 0;
+        updateMinimap();
+        updateUI();
+    }
+
+    function placePatches(type, count, maxW, maxH, minW, minH, extraChance, skipWater) {
+        for (var i = 0; i < count; i++) {
+            var w = minW + Math.floor(Math.random() * (maxW - minW + 1));
+            var h = minH + Math.floor(Math.random() * (maxH - minH + 1));
+            var px = Math.floor(Math.random() * mapSize);
+            var py = Math.floor(Math.random() * mapSize);
+
+            fillRect(type, px, py, w, h, skipWater);
+
+            // Sometimes attach an extra blob for organic shape
+            if (Math.random() < extraChance) {
+                var ax = (px + w + Math.floor(Math.random() * Math.max(3, w/2)) - Math.floor(Math.random() * 3) + mapSize) % mapSize;
+                var ay = (py + Math.floor(Math.random() * h) - Math.floor(h/3) + mapSize) % mapSize;
+                var aw = minW + Math.floor(Math.random() * Math.max(minW+1, Math.floor(w/2)));
+                var ah = minH + Math.floor(Math.random() * Math.max(minH+1, Math.floor(h/2)));
+                fillRect(type, ax, ay, aw, ah, skipWater);
+            }
+        }
+    }
+
+    function fillRect(type, x, y, w, h, skipWater) {
+        for (var dy = 0; dy < h; dy++) {
+            for (var dx = 0; dx < w; dx++) {
+                var tx = (x + dx) % mapSize;
+                var ty = (y + dy) % mapSize;
+                if (skipWater && map[ty][tx] === TERRAIN.WATER) continue;
+                map[ty][tx] = type;
+            }
+        }
+    }
+
+    // ============================================================
+    // MINIMAP
+    // ============================================================
+    var minimapImageData = null;
+
+    function updateMinimap() {
+        // Sample the map down to MINIMAP_SIZE x MINIMAP_SIZE
+        var step = mapSize / MINIMAP_SIZE;
+        var imgData = minimapCtx.createImageData(MINIMAP_SIZE, MINIMAP_SIZE);
+        var data = imgData.data;
+
+        for (var my = 0; my < MINIMAP_SIZE; my++) {
+            for (var mx = 0; mx < MINIMAP_SIZE; mx++) {
+                var srcY = Math.floor(my * step);
+                var srcX = Math.floor(mx * step);
+                var terrain = map[srcY][srcX];
+                var color = TERRAIN_COLORS[terrain];
+                var r = parseInt(color.substr(1,2), 16);
+                var g = parseInt(color.substr(3,2), 16);
+                var b = parseInt(color.substr(5,2), 16);
+                var idx = (my * MINIMAP_SIZE + mx) * 4;
+                data[idx]     = r;
+                data[idx + 1] = g;
+                data[idx + 2] = b;
+                data[idx + 3] = 255;
+            }
+        }
+        minimapCtx.putImageData(imgData, 0, 0);
+        minimapImageData = imgData;
+    }
+
+    function renderMinimap() {
+        // Draw minimap background
+        minimapCtx.putImageData(minimapImageData, 0, 0);
+
+        // Draw viewport rect on minimap
+        var viewW = gameCanvas.width / tileSize;
+        var viewH = gameCanvas.height / tileSize;
+        var scale = MINIMAP_SIZE / mapSize;
+
+        var vx = (playerX - viewW / 2 + mapSize) % mapSize;
+        var vy = (playerY - viewH / 2 + mapSize) % mapSize;
+
+        minimapCtx.strokeStyle = 'rgba(255,255,255,0.7)';
+        minimapCtx.lineWidth = 1;
+        minimapCtx.strokeRect(vx * scale, vy * scale, viewW * scale, viewH * scale);
+
+        // Player dot
+        minimapCtx.fillStyle = '#FFD54F';
+        minimapCtx.beginPath();
+        minimapCtx.arc(playerX * scale, playerY * scale, 1.5, 0, Math.PI * 2);
+        minimapCtx.fill();
+    }
+
+    // ============================================================
+    // INPUT HANDLING
+    // ============================================================
+    var keys = {};
+
+    window.addEventListener('keydown', function(e) {
+        keys[e.key.toLowerCase()] = true;
+
+        if (e.key.toLowerCase() === 'r') {
+            generateMap();
+        }
+
+        // Prevent scroll for game keys
+        var gameKeys = ['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright','r'];
+        if (gameKeys.indexOf(e.key.toLowerCase()) !== -1) {
+            e.preventDefault();
+        }
+    });
+
+    window.addEventListener('keyup', function(e) {
+        keys[e.key.toLowerCase()] = false;
+    });
+
+    gameCanvas.addEventListener('wheel', function(e) {
+        e.preventDefault();
+        var oldSize = tileSize;
+        if (e.deltaY < 0) {
+            tileSize = Math.min(24, tileSize + 1);
+        } else {
+            tileSize = Math.max(4, tileSize - 1);
+        }
+    }, { passive: false });
+
+    document.getElementById('btn-regen').addEventListener('click', generateMap);
+    document.getElementById('btn-zoom-in').addEventListener('click', function() {
+        tileSize = Math.min(24, tileSize + 1);
+    });
+    document.getElementById('btn-zoom-out').addEventListener('click', function() {
+        tileSize = Math.max(4, tileSize - 1);
+    });
+
+    // Hide hint after first movement
+    var hintHidden = false;
+    function hideHint() {
+        if (!hintHidden) {
+            hintHidden = true;
+            document.getElementById('hint').style.opacity = '0';
+        }
+    }
+
+    // ============================================================
+    // MOVEMENT
+    // ============================================================
+    function getMovementInput() {
+        var dx = 0, dy = 0;
+        if (keys['w'] || keys['arrowup'])    dy = -1;
+        if (keys['s'] || keys['arrowdown'])  dy = 1;
+        if (keys['a'] || keys['arrowleft'])  dx = -1;
+        if (keys['d'] || keys['arrowright']) dx = 1;
+        return { dx: dx, dy: dy };
+    }
+
+    function tryMove(dx, dy) {
+        if (dx === 0 && dy === 0) return false;
+
+        var newX = (playerX + dx + mapSize) % mapSize;
+        var newY = (playerY + dy + mapSize) % mapSize;
+
+        // Blocked by water
+        if (map[newY][newX] === TERRAIN.WATER) return false;
+
+        playerX = newX;
+        playerY = newY;
+        hideHint();
+        return true;
+    }
+
+    // ============================================================
+    // RENDERING
+    // ============================================================
+    function render() {
+        var ctx = gameCtx;
+        var w = gameCanvas.width;
+        var h = gameCanvas.height;
+
+        // Background
+        ctx.fillStyle = '#12121e';
+        ctx.fillRect(0, 0, w, h);
+
+        if (!map || mapSize === 0) return;
+
+        var halfViewW = Math.ceil(w / tileSize / 2) + 1;
+        var halfViewH = Math.ceil(h / tileSize / 2) + 1;
+
+        // Center offset (so player is exactly in the middle)
+        var offsetX = Math.floor(w / 2) - Math.floor(tileSize / 2);
+        var offsetY = Math.floor(h / 2) - Math.floor(tileSize / 2);
+
+        // Draw visible tiles
+        for (var sy = -halfViewH; sy <= halfViewH; sy++) {
+            for (var sx = -halfViewW; sx <= halfViewW; sx++) {
+                var worldX = ((playerX + sx) % mapSize + mapSize) % mapSize;
+                var worldY = ((playerY + sy) % mapSize + mapSize) % mapSize;
+
+                var screenX = offsetX + sx * tileSize;
+                var screenY = offsetY + sy * tileSize;
+
+                // Frustum cull
+                if (screenX + tileSize < -tileSize || screenX > w + tileSize ||
+                    screenY + tileSize < -tileSize || screenY > h + tileSize) continue;
+
+                var terrain = map[worldY][worldX];
+
+                // Pick a variant color based on position hash for texture
+                var variantIdx = hash2d(worldX, worldY) % TERRAIN_VARIANTS[terrain].length;
+                ctx.fillStyle = TERRAIN_VARIANTS[terrain][variantIdx];
+                ctx.fillRect(Math.floor(screenX), Math.floor(screenY),
+                             Math.ceil(tileSize), Math.ceil(tileSize));
+
+                // Grid lines (only when tiles are large enough)
+                if (tileSize >= 7) {
+                    ctx.strokeStyle = 'rgba(0,0,0,0.06)';
+                    ctx.lineWidth = 0.5;
+                    ctx.strokeRect(Math.floor(screenX), Math.floor(screenY),
+                                   Math.ceil(tileSize), Math.ceil(tileSize));
+                }
+            }
+        }
+
+        // Draw player
+        var px = Math.floor(w / 2);
+        var py = Math.floor(h / 2);
+        var r = Math.max(3, tileSize * 0.48);
+
+        // Shadow
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.beginPath();
+        ctx.arc(px + 1, py + 1, r, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Body
+        ctx.fillStyle = '#FFD54F';
+        ctx.beginPath();
+        ctx.arc(px, py, r, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Border
+        ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(px, py, r, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Highlight
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        ctx.beginPath();
+        ctx.arc(px - r * 0.25, py - r * 0.3, r * 0.35, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Direction indicator
+        var dirX = 0, dirY = 0;
+        if (keys['w'] || keys['arrowup'])    dirY = -1;
+        if (keys['s'] || keys['arrowdown'])  dirY = 1;
+        if (keys['a'] || keys['arrowleft'])  dirX = -1;
+        if (keys['d'] || keys['arrowright']) dirX = 1;
+
+        if (dirX !== 0 || dirY !== 0) {
+            var len = Math.sqrt(dirX * dirX + dirY * dirY);
+            dirX /= len;
+            dirY /= len;
+            var eyeX = px + dirX * r * 0.4;
+            var eyeY = py + dirY * r * 0.4;
+            ctx.fillStyle = '#333';
+            ctx.beginPath();
+            ctx.arc(eyeX, eyeY, r * 0.22, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    // ============================================================
+    // UI
+    // ============================================================
+    function updateUI() {
+        if (!map) return;
+        var terrain = map[playerY][playerX];
+        document.getElementById('info-size').textContent    = '地图: ' + mapSize + ' x ' + mapSize;
+        document.getElementById('info-coords').textContent  = '坐标: (' + playerX + ', ' + playerY + ')';
+        document.getElementById('info-terrain').textContent = '地形: ' + TERRAIN_NAMES[terrain];
+    }
+
+    // ============================================================
+    // GAME LOOP
+    // ============================================================
+    var lastTime  = performance.now();
+    var fpsFrames = 0;
+    var fpsAccum  = 0;
+    var currentFPS = 60;
+
+    function gameLoop(timestamp) {
+        var dt = (timestamp - lastTime) / 1000;
+        lastTime = timestamp;
+        if (dt > 0.1) dt = 0.1; // clamp
+
+        // FPS
+        fpsFrames++;
+        fpsAccum += dt;
+        if (fpsAccum >= 0.5) {
+            currentFPS = Math.round(fpsFrames / fpsAccum);
+            fpsFrames = 0;
+            fpsAccum = 0;
+            document.getElementById('info-fps').textContent = 'FPS: ' + currentFPS;
+        }
+
+        if (map && mapSize > 0) {
+            var terrain = map[playerY][playerX];
+            var speed = TERRAIN_SPEED[terrain];
+
+            if (speed > 0) {
+                moveAccum += speed * BASE_SPEED * dt;
+
+                while (moveAccum >= 1) {
+                    var input = getMovementInput();
+                    if (input.dx === 0 && input.dy === 0) {
+                        moveAccum = 0;
+                        break;
+                    }
+                    if (tryMove(input.dx, input.dy)) {
+                        moveAccum -= 1;
+                        updateUI();
+                    } else {
+                        moveAccum = 0;
+                        break;
+                    }
+                }
+            } else {
+                moveAccum = 0;
+            }
+            if (moveAccum > 4) moveAccum = 4;
+        }
+
+        render();
+        renderMinimap();
+        requestAnimationFrame(gameLoop);
+    }
+
+    // ============================================================
+    // INIT
+    // ============================================================
+    function init() {
+        generateMap();
+        requestAnimationFrame(gameLoop);
+    }
+
+    init();
+    </script>
+</body>
+</html>
